@@ -1,0 +1,68 @@
+name: Eval
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - "src/codebase_chat_tool/**"
+      - "src/codebase_chat_tool/eval/benchmark/**"
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    services:
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports:
+          - 6333:6333
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: pip install -e ".[dev]"
+
+      - name: Run evaluation harness
+        id: eval
+        env:
+          LLM_PROVIDER: openai
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-4o-mini
+        run: codebase-chat-tool eval --report-path docs/eval_report.md
+        # Exits non-zero on regression vs. docs/eval_baseline.json -- this step
+        # failing is the CI gate. We still want the report artifact/comment
+        # even on failure, so later steps use `if: always()`.
+        continue-on-error: true
+
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: |
+            docs/eval_report.md
+            eval_results.json
+
+      - name: Comment eval report on PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('docs/eval_report.md', 'utf8');
+            const status = '${{ steps.eval.outcome }}' === 'success' ? '✅ No regression' : '❌ Regression detected (see below)';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## Eval report -- ${status}\n\n${report}`,
+            });
+
+      - name: Fail job if eval regressed
+        if: steps.eval.outcome != 'success'
+        run: exit 1
