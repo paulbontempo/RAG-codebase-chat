@@ -1,21 +1,21 @@
 # codebase-chat-tool
 
-I've inherited a legacy codebase before: the original author was gone, there was no documentation, and a deadline was coming. This is the tool I wish I'd had — a CLI assistant that lets you chat with an unfamiliar Python codebase *and* tells you exactly what will break before you change it.
+I've inherited a legacy codebase before. The original devs were gone, there was conflicting documentation, and a deadline was coming. This is the tool I wish I'd had in that situation: a CLI chatbot that lets you ask questions about an unfamiliar Python codebase *and* tells you exactly what will break before you apply your changes, all grounded in hybrid RAG retrieval.
 
-> **Status**: functional end-to-end (indexing, hybrid retrieval, agentic chat, blast-radius analysis, deterministic eval harness). Demo recording is still pending — see [Demo](#demo) below.
+> **Status**: functional end-to-end (indexing, hybrid retrieval, agentic chat, blast-radius analysis, deterministic eval harness). Demo recording is still pending.
 
 ## Demo
 
-*(asciinema/GIF recording pending — in the meantime, see [Quickstart](#quickstart) below for real, copy-pasteable commands and [What it looks like](#what-it-looks-like) for verified real output against `psf/requests`.)*
+*pending*
 
 ## What it does
 
 Two workflows on one index of your codebase:
 
-- **`chat` / `ask`** — agentic Q&A over the code. The LLM decides when to search, fetch a definition, or query the call graph, and every factual claim is cited as `file_path:line`.
-- **`impact`** — blast-radius analysis. Give it a function or class, and it walks the *static call graph* (not an LLM guess) to show every direct/transitive caller, every module that imports it, and every test that looks like it covers it — then uses the LLM only to summarize the risk in plain English.
+- **`chat` / `ask`** — RAG-backed agentic Q&A over the entire codebase. The LLM decides when to search, fetch a definition, or query the call graph, and every factual claim is cited as `file_path:line`, so that you can trace references as needed.
+- **`impact`** — analysis of potential downstream effects *before* you make changes. Give it a function or class, and it walks the *static call graph* (deterministic, no LLM hallucinations) to show every direct/transitive caller, every module that imports it, and every test that looks like it covers it. The LLM is used only to summarize the risk in plain English.
 
-The blast-radius analysis is the part that differentiates this from a generic "chat with your repo" tutorial: most RAG-over-code demos can answer *"what does this do?"* — this one can also answer *"what will I break?"*, using real static analysis (an `ast`-based call/import graph), not vibes.
+The blast-radius analysis is the part that differentiates this from a generic "chat with your repo" project: most RAG-over-code demos can answer *"what does this do?"*, but this one can also answer *"what will I break?"*, using deterministic static analysis (an `ast`-based call/import graph).
 
 ## What it looks like
 
@@ -62,7 +62,7 @@ should proceed with caution, as any alterations to the method's signature or
 behavior could lead to widespread, untested failures across multiple modules.
 ```
 
-("No tests found" here is a real, correctly-reported result: `requests`' test suite lives outside the `src/` layout this was indexed at — see [Limitations](#limitations) — not a false negative from the tool.)
+("No tests found" here is a real, correctly-reported result. `requests`' test suite lives outside the `src/` layout this was indexed at. See [Limitations](#limitations) (not a false negative from the tool.))
 
 ## Architecture
 
@@ -130,10 +130,10 @@ No API key yet? `codebase-chat-tool index` and `codebase-chat-tool graph callers
 ## Limitations
 
 - **Python only, local clones only.** No multi-language support, no `git clone` of a remote URL for you.
-- **Best-effort call resolution.** Dynamic dispatch (`getattr`, calls through a variable whose type isn't known statically) is correctly reported as *unresolved*, not silently dropped or guessed — you'll see this in `graph callers` output as "no resolved callers found" even where a real (polymorphic) caller exists.
-- **`self`/`cls` resolution doesn't cross class inheritance.** A call to `self.method()` resolves within the *defining* class, not up the MRO — so an abstract method overridden in a subclass may show as called from the wrong class.
+- **Best-effort call resolution.** Dynamic dispatch (`getattr`, calls through a variable whose type isn't known statically) is correctly reported as *unresolved*. you'll see this in `graph callers` output as "no resolved callers found" even where a real (polymorphic) caller exists.
+- **`self`/`cls` resolution doesn't cross class inheritance.** A call to `self.method()` resolves within the *defining* class, not up the MRO, so an abstract method overridden in a subclass may show as called from the wrong class.
 - **Decorator expressions aren't call-graph-tracked.** `@app.route(...)` registers a route via a decorator; the decorator's own call isn't currently walked for the call graph (only calls inside function/method bodies are).
-- **`find_tests_for` is a heuristic** (short-name substring match in files under `tests/`), not a true call-graph link into test files — it will occasionally over- or under-match.
+- **`find_tests_for` is a heuristic** (short-name substring match in files under `tests/`), not a true call-graph link into test files. Therefore, it will occasionally over- or under-match. Future versions could add embedding similarity search to improve matching. 
 
 ## Roadmap
 
