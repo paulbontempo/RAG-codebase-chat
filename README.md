@@ -15,11 +15,11 @@ Two workflows on one index of your codebase:
 - **`chat` / `ask`** — RAG-backed agentic Q&A over the entire codebase. The LLM decides when to search, fetch a definition, or query the call graph, and every factual claim is cited as `file_path:line`, so that you can trace references as needed.
 - **`impact`** — analysis of potential downstream effects *before* you make changes. Give it a function or class, and it walks the *static call graph* (deterministic, no LLM hallucinations) to show every direct/transitive caller, every module that imports it, and every test that looks like it covers it. The LLM is used only to summarize the risk in plain English.
 
-The blast-radius analysis is the part that differentiates this from a generic "chat with your repo" project: most RAG-over-code demos can answer *"what does this do?"*, but this one can also answer *"what will I break?"*, using deterministic static analysis (an `ast`-based call/import graph).
+The impact analysis is the part that differentiates this from a generic "chat with your repo" project: other RAG-over-code tools can answer *"what does this do?"*, but this one can also answer *"what will I break?"*, using deterministic static analysis (an `ast`-based call/import graph).
 
 ## What it looks like
 
-Real, verbatim output against [`psf/requests`](https://github.com/psf/requests) (`v2.34.2`):
+The following is the tool's verbatim output against [`psf/requests`](https://github.com/psf/requests) (`v2.34.2`):
 
 ```
 $ codebase-chat-tool impact requests.sessions.Session.send
@@ -52,7 +52,7 @@ Impact analysis: requests.sessions.Session.send
 └──────────────┘
 
 Risk summary:
-The blast radius for the proposed change to `requests.sessions.Session.send` is
+The impact analysis for the proposed change to `requests.sessions.Session.send` is
 significant, as it is directly called by `requests.sessions.Session.request` and
 indirectly affects seven other HTTP methods: delete, get, head, options, patch,
 post, and put. However, a major concern is that there are no tests associated
@@ -62,7 +62,7 @@ should proceed with caution, as any alterations to the method's signature or
 behavior could lead to widespread, untested failures across multiple modules.
 ```
 
-("No tests found" here is a real, correctly-reported result. `requests`' test suite lives outside the `src/` layout this was indexed at. See [Limitations](#limitations) (not a false negative from the tool.))
+("No tests found" here is a correctly-reported result. `requests`' test suite lives outside the `src/` layout this was indexed at. See [Limitations](#limitations) (not a false negative from the tool.))
 
 ## Architecture
 
@@ -76,15 +76,15 @@ Repo (local clone)
   -> cli/         typer + rich
 ```
 
-Two LangGraph workflows share that substrate:
+Two LangGraph workflows share that structure:
 - **`chat_graph`** — the LLM can call `search_code` / `get_definition` / `get_callers` / `get_callees` / `get_importers` / `find_tests_for` mid-conversation, rather than a hardcoded retrieve-then-answer pipeline.
-- **`impact_graph`** — almost entirely deterministic graph traversal; the LLM is used *only* at the very end, to turn a list of callers/dependents/tests into a readable risk summary. I don't trust an LLM to enumerate call sites — I trust static analysis for that, and use the LLM only to prioritize/explain.
+- **`impact_graph`** — almost entirely deterministic graph traversal; the LLM is used *only* at the very end, to turn a list of callers/dependents/tests into a readable risk summary. I don't trust an LLM to accurately and consistently enumerate call sites, so we use static analysis for that, and use the LLM only to prioritize/explain.
 
 See [`docs/architecture.md`](docs/architecture.md) for more detail, including how the eval harness works.
 
 ## Evaluation
 
-Every metric below is computed **deterministically** — exact set/string comparisons, no LLM-as-judge anywhere. Run against 3 pinned real-world repos (`requests`, `flask`, `typer`) with hand-verified gold answers in [`src/codebase_chat_tool/eval/benchmark/`](src/codebase_chat_tool/eval/benchmark/):
+Every metric below is computed **deterministically** with the exact set/string comparisons, no LLM-as-judge anywhere. Run against 3 pinned real-world repos (`requests`, `flask`, `typer`) with hand-verified gold answers in [`src/codebase_chat_tool/eval/benchmark/`](src/codebase_chat_tool/eval/benchmark/):
 
 | Repo | P@k | R@k | MRR | Citation rate | Grounded rate | Keyword coverage | Caller P | Caller R | Caller F1 | Test F1 |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -96,7 +96,7 @@ Every metric below is computed **deterministically** — exact set/string compar
 
 - **P@k / R@k / MRR** — standard IR metrics for the retriever, against hand-labeled gold qualnames.
 - **Citation / grounded rate** — how often the agent cites a source, and of those citations, what fraction point at a location it *actually saw* via a tool call (mechanically verified, not LLM-judged).
-- **Caller P/R/F1, Test F1** — blast-radius accuracy against hand-verified gold caller/test sets, computed directly from the static call graph with zero LLM calls.
+- **Caller P/R/F1, Test F1** — impact analysis (scope) accuracy against hand-verified gold caller/test sets, computed directly from the static call graph with zero LLM calls.
 
 Low P@k is expected and not a bug: `top_k` defaults to 8, but most gold answers are 1-3 symbols, so precision is mechanically capped well below 1.0 even for a perfect retriever. Recall is the metric that matters here, and it's consistently strong.
 
@@ -119,13 +119,13 @@ codebase-chat-tool impact some_module.SomeClass.some_method --repo /path/to/some
 
 No API key yet? `codebase-chat-tool index` and `codebase-chat-tool graph callers <symbol>` both work with zero LLM calls — the call-graph analysis is pure static analysis.
 
-## Design decisions & tradeoffs
+## Design tradeoffs and Justifications
 
-- **tree-sitter for chunking, `ast` for the call graph — not one tool for both.** tree-sitter is error-tolerant (parses a file even with syntax errors elsewhere) and gives precise byte/line spans, which is what chunk boundaries need. Python's `ast` gives fully-typed, semantically rich nodes with zero extra dependency, which is what call-graph construction needs. Each tool is used for what it's actually good at.
-- **Qdrant over Chroma/pgvector.** Payload filtering, HNSW internals, and a real production deployment story (Qdrant Cloud) — reads as production-signal rather than a notebook dependency, and is the more common interview topic for this role family.
-- **Reciprocal Rank Fusion + cross-encoder rerank, not dense-only retrieval.** Code search is a case where identifier/keyword matching (BM25) frequently beats pure embedding similarity — hybrid retrieval with RRF fusion is the standard fix, cheap to implement, and easy to defend in an interview.
-- **A custom provider-agnostic LLM layer, not a direct SDK dependency in business logic.** Anthropic and OpenAI have notably different tool-calling wire formats. Normalizing both into one `LLMProvider` interface is a real abstraction problem, and it means agent/business logic never imports a vendor SDK. This structure also allows for on-the-fly swapping of different cloud LLM providers to keep this tool useful even as the LLM rankings change week to week.
-- **Fully deterministic eval, not RAGAS.** I originally planned to use RAGAS for QA evaluation. Its latest release has a broken import (`langchain_community.chat_models.vertexai`, which no longer exists), and the last version that imports cleanly requires `langchain-core<0.3`, incompatible with the `langgraph>=1.2` this project runs on. Rather than downgrade the whole agent stack to a stale LangChain generation, I built a fully deterministic eval suite instead (standard IR metrics, mechanical citation verification, keyword coverage, and set-based blast-radius accuracy). RAGAS's own faithfulness/relevancy metrics are LLM-judge based internally anyway, so this was actually an improvement, as it removes the "LLM grading an LLM" black box entirely and makes every number in the report auditable by reading the eval code.
+- **tree-sitter for chunking, `ast` for the call graph, rather than one tool for both.** tree-sitter is error-tolerant (parses a file even with syntax errors elsewhere) and gives precise byte/line spans, which is what chunk boundaries need. Python's `ast` gives fully-typed, semantically rich nodes with zero extra dependency, which is what call-graph construction needs. Each tool is used for what it's actually good at.
+- **Qdrant instead of Chroma/pgvector.** Payload filtering, HNSW internals, and it is the more common interview topic for this role family.
+- **Reciprocal Rank Fusion + cross-encoder rerank, not dense-only retrieval.** Code search is a case where identifier/keyword matching (BM25) frequently beats pure embedding similarity. Hybrid retrieval with RRF fusion is the standard fix and is cheap to implement.
+- **A custom provider-agnostic LLM layer, not a direct SDK dependency in business logic.** Anthropic and OpenAI have notably different tool-calling wire formats. Normalizing both into one `LLMProvider` interface took some abstraction, but was worth it because it means agent/business logic never imports a vendor SDK. This structure also allows for on-the-fly swapping of different cloud LLM providers to keep this tool useful even as the LLM rankings change week to week.
+- **Fully deterministic eval, not RAGAS.** I originally planned to use RAGAS for QA evaluation. Its latest release has a broken import (`langchain_community.chat_models.vertexai`, which no longer exists), and the last version that imports cleanly requires `langchain-core<0.3`, incompatible with the `langgraph>=1.2` this project runs on. Rather than downgrade the whole agent stack to a stale LangChain generation, I built a fully deterministic eval suite instead (standard IR metrics, mechanical citation verification, keyword coverage, and set-based impact scope accuracy). RAGAS's own faithfulness/relevancy metrics are LLM-judge based internally anyway, so this was actually an improvement, as it removes the "LLM grading an LLM" black box entirely and makes every number in the report auditable by reading the eval code.
 
 ## Limitations
 
